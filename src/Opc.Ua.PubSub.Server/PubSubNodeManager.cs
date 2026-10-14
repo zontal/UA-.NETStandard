@@ -87,13 +87,15 @@ namespace Opc.Ua.PubSub.Server
         private const uint RemoveSecurityGroupNodeId = 15447;
         private const uint AddPushTargetNodeId = 25441;
         private const uint RemovePushTargetNodeId = 25444;
-        private const uint AddPublishedDataItemsNodeId = 14479;
-        private const uint AddPublishedEventsNodeId = 14482;
-        private const uint AddPublishedDataItemsTemplateNodeId = 16842;
-        private const uint RemovePublishedDataSetNodeId = 14485;
-        private const uint AddDataSetFolderNodeId = 16884;
-        private const uint RemoveDataSetFolderNodeId = 16923;
-        private static readonly NodeId s_publishedDataSetsNodeId = new(14478u);
+        // The methods of the PublishSubscribe.PublishedDataSets instance (i=17371)
+        // and their argument variables, not the DataSetFolderType declarations.
+        private const uint PublishedDataSetsAddPublishedDataItemsNodeId = 17372;
+        private const uint PublishedDataSetsAddPublishedEventsNodeId = 17375;
+        private const uint PublishedDataSetsAddPublishedDataItemsTemplateNodeId = 17378;
+        private const uint PublishedDataSetsRemovePublishedDataSetNodeId = 17384;
+        private const uint PublishedDataSetsAddDataSetFolderNodeId = 17398;
+        private const uint PublishedDataSetsRemoveDataSetFolderNodeId = 17403;
+        private static readonly NodeId s_publishedDataSetsNodeId = ObjectIds.PublishSubscribe_PublishedDataSets;
         private static readonly NodeId s_securityGroupsNodeId = new(15443u);
         private static readonly NodeId s_keyPushTargetsNodeId = new(25440u);
 
@@ -312,6 +314,78 @@ namespace Opc.Ua.PubSub.Server
             BindStandardMethod(file.ReserveIds, OnReservePubSubConfigurationIds);
             BindStandardMethod(file.CloseAndUpdate, OnCloseAndUpdatePubSubConfigurationFile);
             diagnosticsNodeManager.AddNode(file);
+
+            // The DataSetFolderType methods of PublishSubscribe.PublishedDataSets
+            // are Optional, so the standard address space does not contain them.
+            if (publishSubscribe.PublishedDataSets is { } publishedDataSets)
+            {
+                foreach (MethodState method in AddPublishedDataSetsMethods(SystemContext, publishedDataSets))
+                {
+                    diagnosticsNodeManager.AddNode(method);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Materializes the implemented DataSetFolderType methods on the standard
+        /// <c>PublishSubscribe.PublishedDataSets</c> instance with their well-known
+        /// instance NodeIds. The generated <c>Add*</c> extensions create them with the
+        /// NodeIds of the DataSetFolderType declarations, which the address space
+        /// already holds.
+        /// </summary>
+        internal static ArrayOf<MethodState> AddPublishedDataSetsMethods(
+            ISystemContext context,
+            DataSetFolderState publishedDataSets)
+        {
+            publishedDataSets.AddAddPublishedDataItems(context);
+            publishedDataSets.AddAddPublishedEvents(context);
+            publishedDataSets.AddAddPublishedDataItemsTemplate(context);
+            publishedDataSets.AddRemovePublishedDataSet(context);
+            publishedDataSets.AddAddDataSetFolder(context);
+            publishedDataSets.AddRemoveDataSetFolder(context);
+
+            return
+            [
+                AssignInstanceIds(
+                    publishedDataSets.AddPublishedDataItems,
+                    PublishedDataSetsAddPublishedDataItemsNodeId),
+                AssignInstanceIds(publishedDataSets.AddPublishedEvents, PublishedDataSetsAddPublishedEventsNodeId),
+                AssignInstanceIds(
+                    publishedDataSets.AddPublishedDataItemsTemplate,
+                    PublishedDataSetsAddPublishedDataItemsTemplateNodeId),
+                AssignInstanceIds(
+                    publishedDataSets.RemovePublishedDataSet,
+                    PublishedDataSetsRemovePublishedDataSetNodeId),
+                AssignInstanceIds(
+                    publishedDataSets.AddDataSetFolder,
+                    PublishedDataSetsAddDataSetFolderNodeId,
+                    inputArgumentsId: 17401,
+                    outputArgumentsId: 17402),
+                AssignInstanceIds(publishedDataSets.RemoveDataSetFolder, PublishedDataSetsRemoveDataSetFolderNodeId)
+            ];
+        }
+
+        /// <summary>
+        /// Gives a materialized method its instance NodeId. Its InputArguments and
+        /// OutputArguments take the NodeIds that follow it, unless given explicitly.
+        /// </summary>
+        private static MethodState AssignInstanceIds(
+            MethodState? method,
+            uint methodId,
+            uint inputArgumentsId = 0,
+            uint outputArgumentsId = 0)
+        {
+            inputArgumentsId = inputArgumentsId == 0 ? methodId + 1 : inputArgumentsId;
+            outputArgumentsId = outputArgumentsId == 0 ? methodId + 2 : outputArgumentsId;
+            if (method == null)
+            {
+                throw new ServiceResultException(StatusCodes.BadConfigurationError,
+                    "A generated PublishedDataSets method was not created.");
+            }
+            method.NodeId = new NodeId(methodId);
+            method.InputArguments?.NodeId = new NodeId(inputArgumentsId);
+            method.OutputArguments?.NodeId = new NodeId(outputArgumentsId);
+            return method;
         }
 
         private void BindMethods(IDiagnosticsNodeManager diagnosticsNodeManager)
@@ -373,28 +447,44 @@ namespace Opc.Ua.PubSub.Server
             m_methodsBound = enable is not null || disable is not null;
         }
 
+        /// <summary>
+        /// Binds the methods of the standard <c>PublishSubscribe.PublishedDataSets</c>
+        /// instance, the folder that holds the PublishedDataSets and DataSetFolders.
+        /// </summary>
         private void BindPublishedDataSetFolderMethods(IDiagnosticsNodeManager diagnosticsNodeManager)
         {
             BindStandardMethod(
-                diagnosticsNodeManager, AddPublishedDataItemsNodeId, MethodHandlers.OnAddPublishedDataItems);
-            BindStandardMethod(diagnosticsNodeManager, AddPublishedEventsNodeId, MethodHandlers.OnAddPublishedEvents);
+                diagnosticsNodeManager,
+                new NodeId(PublishedDataSetsAddPublishedDataItemsNodeId),
+                MethodHandlers.OnAddPublishedDataItems);
             BindStandardMethod(
                 diagnosticsNodeManager,
-                AddPublishedDataItemsTemplateNodeId,
+                new NodeId(PublishedDataSetsAddPublishedEventsNodeId),
+                MethodHandlers.OnAddPublishedEvents);
+            BindStandardMethod(
+                diagnosticsNodeManager,
+                new NodeId(PublishedDataSetsAddPublishedDataItemsTemplateNodeId),
                 MethodHandlers.OnAddPublishedDataItemsTemplate);
             BindStandardMethod(
-                diagnosticsNodeManager, RemovePublishedDataSetNodeId, MethodHandlers.OnRemovePublishedDataSet);
-            BindStandardMethod(diagnosticsNodeManager, AddDataSetFolderNodeId, OnAddDataSetFolder);
-            BindStandardMethod(diagnosticsNodeManager, RemoveDataSetFolderNodeId, OnRemoveDataSetFolder);
+                diagnosticsNodeManager,
+                new NodeId(PublishedDataSetsRemovePublishedDataSetNodeId),
+                MethodHandlers.OnRemovePublishedDataSet);
+            BindStandardMethod(
+                diagnosticsNodeManager,
+                new NodeId(PublishedDataSetsAddDataSetFolderNodeId),
+                OnAddDataSetFolder);
+            BindStandardMethod(
+                diagnosticsNodeManager,
+                new NodeId(PublishedDataSetsRemoveDataSetFolderNodeId),
+                OnRemoveDataSetFolder);
         }
 
         private static void BindStandardMethod(
             IDiagnosticsNodeManager diagnosticsNodeManager,
-            uint nodeId,
+            NodeId nodeId,
             GenericMethodCalledEventHandler handler)
         {
-            MethodState? method = diagnosticsNodeManager
-                .FindPredefinedNode<MethodState>(new NodeId(nodeId));
+            MethodState? method = diagnosticsNodeManager.FindPredefinedNode<MethodState>(nodeId);
             BindStandardMethod(method, handler);
         }
 
