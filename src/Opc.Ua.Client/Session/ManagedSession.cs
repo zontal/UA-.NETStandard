@@ -261,6 +261,7 @@ namespace Opc.Ua.Client
                 connection,
                 updateBeforeConnect,
                 channelReconnectTimeout: null,
+                rediscoveredEndpointValidator: null,
                 ct);
         }
 
@@ -356,6 +357,7 @@ namespace Opc.Ua.Client
                 connection,
                 updateBeforeConnect,
                 options.ChannelReconnectTimeout,
+                options.ValidateRediscoveredEndpoint,
                 ct).ConfigureAwait(false);
             try
             {
@@ -404,6 +406,7 @@ namespace Opc.Ua.Client
             ITransportWaitingConnection? connection,
             bool? updateBeforeConnect,
             TimeSpan? channelReconnectTimeout,
+            RediscoveredEndpointValidator? rediscoveredEndpointValidator,
             CancellationToken ct)
         {
             if (sessionFactory == null)
@@ -456,7 +459,8 @@ namespace Opc.Ua.Client
                 m_initialConnection = connection,
                 m_reverseConnectRequired = reverseConnectManager != null || connection != null,
                 m_updateBeforeConnect = updateBeforeConnect,
-                m_channelReconnectTimeout = channelReconnectTimeout
+                m_channelReconnectTimeout = channelReconnectTimeout,
+                ValidateRediscoveredEndpoint = rediscoveredEndpointValidator
             };
 
             managed.StateMachine.Start();
@@ -532,6 +536,27 @@ namespace Opc.Ua.Client
 
         /// <inheritdoc/>
         public ISessionFactory SessionFactory { get; }
+
+        /// <summary>
+        /// Validates the endpoint that a reconnect rediscovered before the
+        /// session is recreated against it. When a reconnect is rejected with a
+        /// status that requires the endpoint to be refreshed, the endpoint is
+        /// read again from the server's discovery endpoint and replaces the one
+        /// in use. The validator receives the endpoint in use and the
+        /// rediscovered one. Only a Good result accepts the rediscovered
+        /// endpoint: any other result, an exception or a cancellation keeps the
+        /// endpoint in use and fails the reconnect attempt. When <c>null</c>,
+        /// the rediscovered endpoint is used as it is.
+        /// </summary>
+        /// <remarks>
+        /// Set it through <see cref="ManagedSessionOptions.ValidateRediscoveredEndpoint"/>,
+        /// <c>ManagedSessionBuilder.WithRediscoveredEndpointValidator</c> or a
+        /// <see cref="RediscoveredEndpointValidator"/> registered in the service
+        /// collection so that it is installed before the session connects;
+        /// setting this property later only affects reconnects that start
+        /// afterwards.
+        /// </remarks>
+        public RediscoveredEndpointValidator? ValidateRediscoveredEndpoint { get; set; }
 
         /// <inheritdoc/>
         /// <remarks>
@@ -1873,18 +1898,78 @@ namespace Opc.Ua.Client
 
         private async Task RefreshEndpointAsync(ConfiguredEndpoint endpoint, CancellationToken ct)
         {
-            ITransportWaitingConnection? connection = await WaitForRecoveryConnectionAsync(endpoint, ct)
-                .ConfigureAwait(false);
-            if (connection == null)
+            await RefreshAndValidateEndpointAsync(
+                endpoint,
+                async token =>
+                {
+                    ITransportWaitingConnection? connection = await WaitForRecoveryConnectionAsync(endpoint, token)
+                        .ConfigureAwait(false);
+                    if (connection == null)
+                    {
+                        await endpoint.UpdateFromServerAsync(m_configuration, SessionFactory.Telemetry, token)
+                            .ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await endpoint.UpdateFromServerAsync(
+                            endpoint.EndpointUrl!, connection, endpoint.Description.SecurityMode,
+                            endpoint.Description.SecurityPolicyUri!, SessionFactory.Telemetry, token)
+                            .ConfigureAwait(false);
+                    }
+                },
+                ValidateRediscoveredEndpoint,
+                ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Refreshes <paramref name="endpoint"/> through <paramref name="update"/>
+        /// and lets <paramref name="validator"/> accept or reject the result.
+        /// The check is fail-closed: unless the validator returns a Good
+        /// result, the endpoint is restored to the description it had before,
+        /// including when the refresh or the validator throws or is cancelled.
+        /// </summary>
+        /// <exception cref="ServiceResultException">The validator rejected the
+        /// rediscovered endpoint; a Bad result is thrown as it is, an
+        /// Uncertain or missing result as
+        /// <see cref="StatusCodes.BadSecurityChecksFailed"/>.</exception>
+        internal static async Task RefreshAndValidateEndpointAsync(
+            ConfiguredEndpoint endpoint,
+            Func<CancellationToken, Task> update,
+            RediscoveredEndpointValidator? validator,
+            CancellationToken ct)
+        {
+            if (validator == null)
             {
-                await endpoint.UpdateFromServerAsync(m_configuration, SessionFactory.Telemetry, ct)
-                    .ConfigureAwait(false);
+                await update(ct).ConfigureAwait(false);
+                return;
             }
-            else
+
+            EndpointDescription current = CoreUtils.Clone(endpoint.Description)!;
+            ServiceResult? result;
+            try
             {
-                await endpoint.UpdateFromServerAsync(
-                    endpoint.EndpointUrl!, connection, endpoint.Description.SecurityMode,
-                    endpoint.Description.SecurityPolicyUri!, SessionFactory.Telemetry, ct).ConfigureAwait(false);
+                await update(ct).ConfigureAwait(false);
+                result = await validator(current, endpoint.Description, ct).ConfigureAwait(false);
+
+                // A validator may ignore the token and still return Good; a
+                // cancelled validation is never an acceptance.
+                ct.ThrowIfCancellationRequested();
+            }
+            catch
+            {
+                endpoint.Update(current);
+                throw;
+            }
+
+            if (result == null || !ServiceResult.IsGood(result))
+            {
+                endpoint.Update(current);
+                throw new ServiceResultException(
+                    result != null && ServiceResult.IsBad(result)
+                        ? result
+                        : new ServiceResult(
+                            StatusCodes.BadSecurityChecksFailed,
+                            new LocalizedText("The rediscovered endpoint was not accepted.")));
             }
         }
 
